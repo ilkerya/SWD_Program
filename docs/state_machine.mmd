@@ -1,0 +1,54 @@
+%% SWD_Program - main state machine (matches SWD_Program.ino / stm32_flash.cpp)
+stateDiagram-v2
+    direction TB
+
+    [*] --> BOOT
+    BOOT: BOOT<br/>IO init (ERROR/BUSY/PASS = LOW)<br/>SWD lines high-Z, display init
+
+    BOOT --> IDLE
+    IDLE: IDLE / READY<br/>show SD status + .bin per folder<br/>rescan SD every 3 s (until first job)
+    IDLE --> IDLE: 3 s timer / rescan SD
+
+    IDLE --> JOB: START falling edge (debounced 30 ms)<br/>ERROR=LOW, PASS=LOW, BUSY=HIGH
+    PASS --> JOB: START
+    FAIL --> JOB: START
+
+    state JOB {
+        direction TB
+        [*] --> SD_INIT
+        SD_INIT: SD_INIT<br/>mount FAT32 (SdFat, SPI1)
+        SD_INIT --> CONNECT: card OK
+
+        CONNECT: CONNECT<br/>line reset, JTAG→SWD, read DPIDR<br/>debug power-up
+        CONNECT --> CONNECT_RST: no response and NRST wired
+        CONNECT_RST: CONNECT_UNDER_RESET<br/>NRST=LOW, retry SWD
+        CONNECT --> HALT: DPIDR OK
+        CONNECT_RST --> HALT: DPIDR OK
+
+        HALT: HALT<br/>C_HALT + VC_CORERESET<br/>system reset → halt at reset vector
+        HALT --> IDENTIFY: S_HALT set
+
+        IDENTIFY: IDENTIFY<br/>CPUID + DBGMCU IDCODE<br/>0x413 → F405 · 0x460 → G071<br/>read flash size, check RDP
+        IDENTIFY --> SELECT_FILE: supported, RDP level 0
+
+        SELECT_FILE: SELECT_FILE<br/>exactly one .bin in /F405 or /G071
+        SELECT_FILE --> CHECK_IMAGE: file found
+
+        CHECK_IMAGE: CHECK_IMAGE<br/>size ≤ flash, vector table valid
+        CHECK_IMAGE --> ERASE: image OK
+
+        ERASE: ERASE (1/3)<br/>F4 sectors / G0 2 KB pages<br/>progress bar
+        ERASE --> PROGRAM: done
+
+        PROGRAM: PROGRAM (2/3)<br/>4 KB chunks from SD<br/>F4 32-bit · G0 64-bit
+        PROGRAM --> VERIFY: done (VERIFY_AFTER_PROGRAM=1)
+
+        VERIFY: VERIFY (3/3)<br/>read back and compare
+        VERIFY --> [*]: match
+    }
+
+    JOB --> PASS: success<br/>lock flash, reset & run target
+    JOB --> FAIL: any error in any state<br/>lock flash, release SWD
+
+    PASS: PASS<br/>BUSY=LOW, PASS=HIGH<br/>green banner + time
+    FAIL: ERROR<br/>BUSY=LOW, ERROR=HIGH (latched)<br/>red banner + error text
